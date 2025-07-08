@@ -28,6 +28,7 @@ import (
 	"time"
 
 	dshelp "github.com/ipfs/boxo/datastore/dshelp"
+	"github.com/ipfs/go-ds-crdt/clset"
 	pb "github.com/ipfs/go-ds-crdt/pb"
 	"go.uber.org/multierr"
 	"google.golang.org/protobuf/proto"
@@ -172,7 +173,7 @@ type Datastore struct {
 	// permanent storage
 	store     ds.Datastore
 	namespace ds.Key
-	set       *set
+	set       *clset.Set
 	heads     *heads
 
 	dagService  ipld.DAGService
@@ -182,7 +183,7 @@ type Datastore struct {
 	seenHeads    map[cid.Cid]struct{}
 
 	curDeltaMux sync.Mutex
-	curDelta    *pb.Delta // current, unpublished delta
+	curDelta    *pb.CLSetDelta // current, unpublished delta
 
 	wg sync.WaitGroup
 
@@ -199,7 +200,7 @@ type dagJob struct {
 	nodeGetter *crdtNodeGetter // a node getter to use
 	root       cid.Cid         // the root of the branch we are walking down
 	rootPrio   uint64          // the priority of the root delta
-	delta      *pb.Delta       // the current delta
+	delta      *pb.CLSetDelta  // the current delta
 	node       ipld.Node       // the current ipld Node
 
 }
@@ -259,7 +260,7 @@ func New(
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	set, err := newCRDTSet(ctx, store, fullSetNs, dagSyncer, opts.Logger, setPutHook, setDeleteHook)
+	set, err := clset.New(ctx, store, fullSetNs, dagSyncer, opts.Logger, setPutHook, setDeleteHook)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("error setting up crdt set: %w", err)
@@ -786,7 +787,7 @@ func (store *Datastore) MarkClean(ctx context.Context) {
 
 // processNode merges the delta in a node and has the logic about what to do
 // then.
-func (store *Datastore) processNode(ctx context.Context, ng *crdtNodeGetter, root cid.Cid, rootPrio uint64, delta *pb.Delta, node ipld.Node) ([]cid.Cid, error) {
+func (store *Datastore) processNode(ctx context.Context, ng *crdtNodeGetter, root cid.Cid, rootPrio uint64, delta *pb.CLSetDelta, node ipld.Node) ([]cid.Cid, error) {
 	// First,  merge the delta in this node.
 	current := node.Cid()
 	blockKey := dshelp.MultihashToDsKey(current.Hash()).String()
@@ -1053,7 +1054,10 @@ func (store *Datastore) Query(ctx context.Context, q query.Query) (query.Results
 
 // Put stores the object `value` named by `key`.
 func (store *Datastore) Put(ctx context.Context, key ds.Key, value []byte) error {
-	delta := store.set.Add(ctx, key.String(), value)
+	delta, err := store.set.Add(ctx, key.String(), value)
+	if err != nil {
+		return fmt.Errorf("can't add to set: %w", err)
+	}
 	return store.publish(ctx, delta)
 }
 
@@ -1062,10 +1066,6 @@ func (store *Datastore) Delete(ctx context.Context, key ds.Key) error {
 	delta, err := store.set.Rmv(ctx, key.String())
 	if err != nil {
 		return err
-	}
-
-	if len(delta.Tombstones) == 0 {
-		return nil
 	}
 	return store.publish(ctx, delta)
 }
@@ -1110,7 +1110,7 @@ func (store *Datastore) Sync(ctx context.Context, prefix ds.Key) error {
 
 	// attempt to be intelligent and sync only all heads and the
 	// set entries related to the given prefix.
-	err := store.set.datastoreSync(ctx, prefix)
+	err := store.set.DatastoreSync(ctx, prefix)
 	err2 := store.store.Sync(ctx, store.heads.namespace)
 	return multierr.Combine(err, err2)
 }
@@ -1132,11 +1132,10 @@ func (store *Datastore) Batch(ctx context.Context) (ds.Batch, error) {
 	return &batch{ctx: ctx, store: store}, nil
 }
 
-func deltaMerge(d1, d2 *pb.Delta) *pb.Delta {
-	result := &pb.Delta{
-		Elements:   append(d1.GetElements(), d2.GetElements()...),
-		Tombstones: append(d1.GetTombstones(), d2.GetTombstones()...),
-		Priority:   d1.GetPriority(),
+func deltaMerge(d1, d2 *pb.CLSetDelta) *pb.CLSetDelta {
+	result := &pb.CLSetDelta{
+		Elements: append(d1.GetElements(), d2.GetElements()...),
+		Priority: d1.GetPriority(),
 	}
 	if h := d2.GetPriority(); h > result.Priority {
 		result.Priority = h
@@ -1146,7 +1145,11 @@ func deltaMerge(d1, d2 *pb.Delta) *pb.Delta {
 
 // returns delta size and error
 func (store *Datastore) addToDelta(ctx context.Context, key string, value []byte) (int, error) {
-	return store.updateDelta(store.set.Add(ctx, key, value)), nil
+	delta, err := store.set.Add(ctx, key, value)
+	if err != nil {
+		return 0, fmt.Errorf("can't add to set: %w", err)
+	}
+	return store.updateDelta(delta), nil
 
 }
 
@@ -1162,20 +1165,19 @@ func (store *Datastore) rmvToDelta(ctx context.Context, key string) (int, error)
 
 // to satisfy datastore semantics, we need to remove elements from the current
 // batch if they were added.
-func (store *Datastore) updateDeltaWithRemove(key string, newDelta *pb.Delta) int {
+func (store *Datastore) updateDeltaWithRemove(key string, newDelta *pb.CLSetDelta) int {
 	var size int
 	store.curDeltaMux.Lock()
 	{
-		elems := make([]*pb.Element, 0)
+		elems := make([]*pb.CLSetElement, 0)
 		for _, e := range store.curDelta.GetElements() {
 			if e.GetKey() != key {
 				elems = append(elems, e)
 			}
 		}
-		store.curDelta = &pb.Delta{
-			Elements:   elems,
-			Tombstones: store.curDelta.GetTombstones(),
-			Priority:   store.curDelta.GetPriority(),
+		store.curDelta = &pb.CLSetDelta{
+			Elements: elems,
+			Priority: store.curDelta.GetPriority(),
 		}
 		store.curDelta = deltaMerge(store.curDelta, newDelta)
 		size = proto.Size(store.curDelta)
@@ -1184,7 +1186,7 @@ func (store *Datastore) updateDeltaWithRemove(key string, newDelta *pb.Delta) in
 	return size
 }
 
-func (store *Datastore) updateDelta(newDelta *pb.Delta) int {
+func (store *Datastore) updateDelta(newDelta *pb.CLSetDelta) int {
 	var size int
 	store.curDeltaMux.Lock()
 	{
@@ -1206,7 +1208,7 @@ func (store *Datastore) publishDelta(ctx context.Context) error {
 	return nil
 }
 
-func (store *Datastore) putBlock(ctx context.Context, heads []cid.Cid, height uint64, delta *pb.Delta) (ipld.Node, error) {
+func (store *Datastore) putBlock(ctx context.Context, heads []cid.Cid, height uint64, delta *pb.CLSetDelta) (ipld.Node, error) {
 	if delta != nil {
 		delta.Priority = height
 	}
@@ -1225,7 +1227,7 @@ func (store *Datastore) putBlock(ctx context.Context, heads []cid.Cid, height ui
 	return node, nil
 }
 
-func (store *Datastore) publish(ctx context.Context, delta *pb.Delta) error {
+func (store *Datastore) publish(ctx context.Context, delta *pb.CLSetDelta) error {
 	// curDelta might be nil if nothing has been added to it
 	if delta == nil {
 		return nil
@@ -1237,7 +1239,7 @@ func (store *Datastore) publish(ctx context.Context, delta *pb.Delta) error {
 	return store.broadcast(ctx, []cid.Cid{c})
 }
 
-func (store *Datastore) addDAGNode(ctx context.Context, delta *pb.Delta) (cid.Cid, error) {
+func (store *Datastore) addDAGNode(ctx context.Context, delta *pb.CLSetDelta) (cid.Cid, error) {
 	heads, height, err := store.heads.List(ctx)
 	if err != nil {
 		return cid.Undef, fmt.Errorf("error listing heads: %w", err)
@@ -1386,13 +1388,9 @@ func (store *Datastore) printDAGRec(ctx context.Context, from cid.Cid, depth uin
 	cidStr := nd.Cid().String()
 	cidStr = cidStr[len(cidStr)-4:]
 	line += fmt.Sprintf("- %d | %s: ", delta.GetPriority(), cidStr)
-	line += "Add: {"
+	line += "Elements: {"
 	for _, e := range delta.GetElements() {
 		line += fmt.Sprintf("%s:%s,", e.GetKey(), e.GetValue())
-	}
-	line += "}. Rmv: {"
-	for _, e := range delta.GetTombstones() {
-		line += fmt.Sprintf("%s,", e.GetKey())
 	}
 	line += "}. Links: {"
 	for _, l := range nd.Links() {
@@ -1467,12 +1465,11 @@ func (store *Datastore) dotDAGRec(ctx context.Context, w io.Writer, from cid.Cid
 		return err
 	}
 
-	fmt.Fprintf(w, "%s [label=\"%d | %s: +%d -%d\"]\n",
+	fmt.Fprintf(w, "%s [label=\"%d | %s: +%d\"]\n",
 		cidLong,
 		delta.GetPriority(),
 		cidShort,
 		len(delta.GetElements()),
-		len(delta.GetTombstones()),
 	)
 	fmt.Fprintf(w, "%s -> {", cidLong)
 	for _, l := range nd.Links() {

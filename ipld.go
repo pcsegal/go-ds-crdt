@@ -20,7 +20,7 @@ type crdtNodeGetter struct {
 	ipld.NodeGetter
 }
 
-func (ng *crdtNodeGetter) GetDelta(ctx context.Context, c cid.Cid) (ipld.Node, *pb.Delta, error) {
+func (ng *crdtNodeGetter) GetDelta(ctx context.Context, c cid.Cid) (ipld.Node, *pb.CLSetDelta, error) {
 	nd, err := ng.Get(ctx, c)
 	if err != nil {
 		return nil, nil, err
@@ -39,7 +39,7 @@ func (ng *crdtNodeGetter) GetPriority(ctx context.Context, c cid.Cid) (uint64, e
 }
 
 type deltaOption struct {
-	delta *pb.Delta
+	delta *pb.CLSetDelta
 	node  ipld.Node
 	err   error
 }
@@ -69,17 +69,17 @@ func (ng *crdtNodeGetter) GetDeltas(ctx context.Context, cids []cid.Cid) <-chan 
 	return deltaOpts
 }
 
-func extractDelta(nd ipld.Node) (*pb.Delta, error) {
+func extractDelta(nd ipld.Node) (*pb.CLSetDelta, error) {
 	protonode, ok := nd.(*dag.ProtoNode)
 	if !ok {
 		return nil, errors.New("node is not a ProtoNode")
 	}
-	d := pb.Delta{}
+	d := pb.CLSetDelta{}
 	err := proto.Unmarshal(protonode.Data(), &d)
 	return &d, err
 }
 
-func makeNode(delta *pb.Delta, heads []cid.Cid) (ipld.Node, error) {
+func makeNode(delta *pb.CLSetDelta, heads []cid.Cid) (ipld.Node, error) {
 	var data []byte
 	var err error
 	if delta != nil {
