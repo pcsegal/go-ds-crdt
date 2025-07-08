@@ -15,3 +15,14 @@ message Element {
   string id = 2;
   bytes value = 3;
 }
+
+message CLSetDelta {
+  repeated CLSetElement elements = 1;
+  uint64 priority = 2;
+}
+
+message CLSetElement {
+  string key = 1;
+  uint64 cl = 2;
+  bytes value = 3;
+}

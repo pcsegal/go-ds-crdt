@@ -1,53 +1,45 @@
 package crdt
 
-import (
-	"context"
-	"encoding/binary"
-	"errors"
-	"fmt"
-	"strings"
+import "context"
 
-	ds "github.com/ipfs/go-datastore"
-	query "github.com/ipfs/go-datastore/query"
-)
-
+/*
 // Use this to detect if we need to run migrations.
 var version uint64 = 1
 
-func (store *Datastore) versionKey() ds.Key {
-	return store.namespace.ChildString(versionKey)
-}
+	func (store *Datastore) versionKey() ds.Key {
+		return store.namespace.ChildString(versionKey)
+	}
 
-func (store *Datastore) getVersion(ctx context.Context) (uint64, error) {
-	versionK := store.versionKey()
-	data, err := store.store.Get(ctx, versionK)
-	if err != nil {
-		if err == ds.ErrNotFound {
-			return 0, nil
+	func (store *Datastore) getVersion(ctx context.Context) (uint64, error) {
+		versionK := store.versionKey()
+		data, err := store.store.Get(ctx, versionK)
+		if err != nil {
+			if err == ds.ErrNotFound {
+				return 0, nil
+			}
+			return 0, err
 		}
-		return 0, err
+
+		v, n := binary.Uvarint(data)
+		if n <= 0 {
+			return v, errors.New("error decoding version")
+		}
+		return v - 1, nil
 	}
 
-	v, n := binary.Uvarint(data)
-	if n <= 0 {
-		return v, errors.New("error decoding version")
+	func (store *Datastore) setVersion(ctx context.Context, v uint64) error {
+		versionK := store.versionKey()
+		buf := make([]byte, binary.MaxVarintLen64)
+		n := binary.PutUvarint(buf, v+1)
+		if n == 0 {
+			return errors.New("error encoding version")
+		}
+
+		return store.store.Put(ctx, versionK, buf[0:n])
 	}
-	return v - 1, nil
-}
-
-func (store *Datastore) setVersion(ctx context.Context, v uint64) error {
-	versionK := store.versionKey()
-	buf := make([]byte, binary.MaxVarintLen64)
-	n := binary.PutUvarint(buf, v+1)
-	if n == 0 {
-		return errors.New("error encoding version")
-	}
-
-	return store.store.Put(ctx, versionK, buf[0:n])
-}
-
+*/
 func (store *Datastore) applyMigrations(ctx context.Context) error {
-	v, err := store.getVersion(ctx)
+	/*v, err := store.getVersion(ctx)
 	if err != nil {
 		return err
 	}
@@ -68,10 +60,11 @@ func (store *Datastore) applyMigrations(ctx context.Context) error {
 	case version:
 		store.logger.Infof("CRDT database format v%d", version)
 		return nil
-	}
+	}*/
 	return nil
 }
 
+/*
 // migrate0to1 re-sets all the values and priorities of previously tombstoned
 // elements to deal with the aftermath of
 // https://github.com/ipfs/go-ds-crdt/issues/238. This bug caused that the
@@ -156,3 +149,5 @@ func (store *Datastore) migrate0to1(ctx context.Context) error {
 	s.logger.Infof("Migration v0 to v1 finished (%d elements affected)", total)
 	return nil
 }
+
+*/
