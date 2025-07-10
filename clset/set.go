@@ -73,7 +73,7 @@ func (s *Set) Add(ctx context.Context, key string, value []byte) (*pb.CLSetDelta
 		}, nil
 	}
 
-	_, cl, _, err := decodeValue(existingElement)
+	_, cl, existingValue, err := decodeValue(existingElement)
 	if err != nil {
 		return nil, err
 	}
@@ -92,17 +92,21 @@ func (s *Set) Add(ctx context.Context, key string, value []byte) (*pb.CLSetDelta
 		}, nil
 	}
 
-	// Odd causal length: element already exists, so update it without changing its causal length.
-
-	return &pb.CLSetDelta{
-		Elements: []*pb.CLSetElement{
-			{
-				Key:   key,
-				Cl:    cl,
-				Value: value,
+	// Odd causal length: element already exists.
+	if !bytes.Equal(value, existingValue) {
+		// If the value has changed, update the element's value without changing its causal length.
+		return &pb.CLSetDelta{
+			Elements: []*pb.CLSetElement{
+				{
+					Key:   key,
+					Cl:    cl,
+					Value: value,
+				},
 			},
-		},
-	}, nil
+		}, nil
+	}
+	// Otherwise, there is nothing to be done, so return a nil delta.
+	return nil, nil
 }
 
 // Rmv returns a new delta-set removing the given key.
